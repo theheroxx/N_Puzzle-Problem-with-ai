@@ -17,6 +17,7 @@ import (
 )
 
 var n = 3
+var idsPath []string // for IDS path building
 
 // ---------- Utility functions ----------
 
@@ -256,40 +257,61 @@ func aStar(start, goal [][]int) [][][]int {
 
 // ---------- IDS ----------
 
-func idsD(state [][]int, goal [][]int, d int, visited map[string]bool) [][][]int {
-	if serialize(state) == serialize(goal) {
-		return [][][]int{state}
-	}
-	if d == 0 {
-		return nil
-	}
-	key := serialize(state)
-	if visited[key] {
-		return nil
-	}
-	visited[key] = true
+//var idsPath []string
 
-	for _, nb := range getNeighbors(state) {
-		result := idsD(nb, goal, d-1, visited)
-		if result != nil {
-			return append([][][]int{state}, result...)
-		}
-	}
-	return nil
-}
-
-func ids(start, goal [][]int, maxDepth int) [][][]int {
+func ids(start, goal [][]int, _ int) [][][]int { // maxDepth ignored — we auto-limit
 	if !isSolvable(start, goal) {
 		return nil
 	}
-	for d := 0; d <= maxDepth; d++ {
-		visited := make(map[string]bool)
-		result := idsD(start, goal, d, visited)
-		if result != nil {
-			return result
+	startKey := serialize(start)
+	goalKey := serialize(goal)
+	if startKey == goalKey {
+		return [][][]int{start}
+	}
+
+	idsPath = idsPath[:0] // reuse slice
+	depth := 0
+	for {
+		visited := make(map[string]bool, 1<<16) // 64 KB start, grows safely
+		if idsDfs(startKey, goalKey, depth, "", visited) {
+			// Convert keys → matrices only once
+			path := make([][][]int, len(idsPath))
+			for i := range idsPath {
+				path[i] = deserialize(idsPath[i])
+			}
+			return path
+		}
+		depth++
+		if depth > 200 { // safety
+			return nil
 		}
 	}
-	return nil
+}
+
+func idsDfs(curr, goal string, depth int, parent string, visited map[string]bool) bool {
+	if depth < 0 {
+		return false
+	}
+	if curr == goal {
+		idsPath = append(idsPath, curr)
+		return true
+	}
+	if visited[curr] {
+		return false
+	}
+	visited[curr] = true
+	defer delete(visited, curr)
+
+	for _, neigh := range getNeighborKeys(curr) {
+		if neigh == parent {
+			continue
+		}
+		if idsDfs(neigh, goal, depth-1, curr, visited) {
+			idsPath = append(idsPath, curr)
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- BFS ----------
@@ -300,34 +322,78 @@ func bfs(start, goal [][]int) [][][]int {
 	}
 	startKey := serialize(start)
 	goalKey := serialize(goal)
-	parent := make(map[string]string)
-	parent[startKey] = ""
-	queue := list.New()
-	queue.PushBack(startKey)
+	if startKey == goalKey {
+		return [][][]int{start}
+	}
 
-	for queue.Len() > 0 {
-		elem := queue.Remove(queue.Front()).(string)
-		if elem == goalKey {
-			pathKeys := []string{}
-			cur := elem
-			for cur != "" {
-				pathKeys = append([]string{cur}, pathKeys...)
-				cur = parent[cur]
+	// Forward search
+	fwdParent := map[string]string{startKey: ""}
+	fwdQ := list.New()
+	fwdQ.PushBack(startKey)
+
+	// Backward search
+	bwdParent := map[string]string{goalKey: ""}
+	bwdQ := list.New()
+	bwdQ.PushBack(goalKey)
+
+	for fwdQ.Len() > 0 && bwdQ.Len() > 0 {
+		// --- Forward step ---
+		if fwdQ.Len() > 0 {
+			curr := fwdQ.Remove(fwdQ.Front()).(string)
+			if _, ok := bwdParent[curr]; ok {
+				return buildPath(fwdParent, bwdParent, curr)
 			}
-			path := make([][][]int, len(pathKeys))
-			for i, k := range pathKeys {
-				path[i] = deserialize(k)
+			for _, neigh := range getNeighborKeys(curr) {
+				if _, seen := fwdParent[neigh]; !seen {
+					fwdParent[neigh] = curr
+					fwdQ.PushBack(neigh)
+				}
 			}
-			return path
 		}
-		for _, mv := range getNeighborKeys(elem) {
-			if _, exists := parent[mv]; !exists {
-				parent[mv] = elem
-				queue.PushBack(mv)
+
+		// --- Backward step ---
+		if bwdQ.Len() > 0 {
+			curr := bwdQ.Remove(bwdQ.Front()).(string)
+			if _, ok := fwdParent[curr]; ok {
+				return buildPath(fwdParent, bwdParent, curr)
 			}
+			for _, neigh := range getNeighborKeys(curr) {
+				if _, seen := bwdParent[neigh]; !seen {
+					bwdParent[neigh] = curr
+					bwdQ.PushBack(neigh)
+				}
+			}
+		}
+
+		// Memory cap: stop if too big
+		if len(fwdParent)+len(bwdParent) > 2_000_000 { // ~40 MB safe limit
+			return nil
 		}
 	}
 	return nil
+}
+
+// Helper: reconstruct path from meeting point
+func buildPath(fwd, bwd map[string]string, meet string) [][][]int {
+	// Forward part
+	var path []string
+	cur := meet
+	for cur != "" {
+		path = append([]string{cur}, path...)
+		cur = fwd[cur]
+	}
+	// Backward part
+	cur = bwd[meet]
+	for cur != "" {
+		path = append(path, cur)
+		cur = bwd[cur]
+	}
+	// Convert to [][]int
+	result := make([][][]int, len(path))
+	for i, k := range path {
+		result[i] = deserialize(k)
+	}
+	return result
 }
 
 // ---------- GUI ----------
